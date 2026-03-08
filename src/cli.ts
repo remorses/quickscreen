@@ -86,6 +86,7 @@ If no layout is specified, lists available layouts.`)
       layout.padding,
       layout.windows.length,
       layout.recording,
+      layout.align,
     )
 
     // Arrange windows

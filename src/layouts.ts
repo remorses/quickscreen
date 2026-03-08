@@ -25,6 +25,8 @@ export interface Layout {
     /** Bottom padding as fraction of screen height */
     bottom: number
   }
+  /** Horizontal alignment of the layout area on screen (default: 'center') */
+  align?: 'left' | 'center' | 'right'
   /** What area to record */
   recording: {
     /** 'fullscreen' records the entire display, 'windows' crops to the arranged window area */
@@ -49,6 +51,7 @@ export const defaultLayouts: Layout[] = [
       { app: 'Google Chrome', position: 'left' },
       { app: 'Alacritty', position: 'right' },
     ],
+    align: 'left',
     padding: { edge: 0.035, gap: 0.023, top: 0.083, bottom: 0.083 },
     recording: { area: 'windows', aspectRatio: 16 / 9 },
   },

@@ -59,6 +59,8 @@ export function startRecording(opts: RecordingOptions): ChildProcess {
   const framerate = opts.framerate ?? 30
 
   const args: string[] = [
+    // Large thread queue to prevent audio buffer underruns during encoding
+    '-thread_queue_size', '4096',
     // Input: screen + audio
     '-f', 'avfoundation',
     '-framerate', String(framerate),
@@ -83,16 +85,17 @@ export function startRecording(opts: RecordingOptions): ChildProcess {
     args.push('-vf', vf.join(','))
   }
 
-  // Video codec
+  // Video codec: h264_videotoolbox (Apple hardware encoder) to avoid CPU
+  // bottleneck that causes audio crackling. Uses GPU instead of CPU.
+  // Note: videotoolbox doesn't support -crf, uses -q:v (0-100, lower = better)
+  const quality = Math.round(crf * 3) // rough crf-to-quality mapping
   args.push(
-    '-c:v', 'libx264',
-    '-preset', 'ultrafast',
-    '-crf', String(crf),
+    '-c:v', 'h264_videotoolbox',
+    '-q:v', String(quality),
     '-pix_fmt', 'yuv420p',
   )
 
-  // Audio codec — force 44100 Hz output sample rate to avoid crackling
-  // caused by sample rate mismatch between capture device and encoder
+  // Audio codec — force 44100 Hz output sample rate to match common mic rates
   if (opts.audio) {
     args.push('-c:a', 'aac', '-b:a', '128k', '-ar', '44100')
   }
@@ -142,6 +145,7 @@ export function calculateLayoutGeometry(
   padding: { edge: number; gap: number; top: number; bottom: number },
   windowCount: number,
   recording: { area: 'fullscreen' | 'windows'; aspectRatio?: number },
+  align: 'left' | 'center' | 'right' = 'center',
 ): {
   windowFrames: Rect[]
   recordingRect: Rect | undefined
@@ -169,8 +173,15 @@ export function calculateLayoutGeometry(
   const usableW = totalW - 2 * edgePx
   const usableH = totalH - topPx - bottomPx
 
-  // Center the constrained area on the screen
-  const offsetX = screenX + (screenW - totalW) / 2
+  // Align the constrained area on the screen
+  let offsetX: number
+  if (align === 'left') {
+    offsetX = screenX
+  } else if (align === 'right') {
+    offsetX = screenX + (screenW - totalW)
+  } else {
+    offsetX = screenX + (screenW - totalW) / 2
+  }
   const offsetY = screenY + (screenH - totalH) / 2
 
   const windowFrames: Rect[] = []
