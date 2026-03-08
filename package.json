@@ -1,0 +1,52 @@
+{
+  "name": "quickscreen",
+  "version": "0.1.1",
+  "description": "CLI tool to arrange windows into predefined layouts and record the screen with optional microphone audio on macOS",
+  "type": "module",
+  "main": "./dist/cli.js",
+  "types": "./dist/cli.d.ts",
+  "bin": {
+    "quickscreen": "./dist/cli.js"
+  },
+  "exports": {
+    "./package.json": "./package.json",
+    ".": {
+      "types": "./dist/cli.d.ts",
+      "default": "./dist/cli.js"
+    },
+    "./src": {
+      "types": "./src/cli.ts",
+      "default": "./src/cli.ts"
+    },
+    "./src/*": {
+      "types": "./src/*.ts",
+      "default": "./src/*.ts"
+    }
+  },
+  "files": [
+    "src",
+    "dist",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/cli.js",
+    "dev": "bun src/cli.ts",
+    "prepublishOnly": "bun run build"
+  },
+  "keywords": [
+    "screen-recording",
+    "ffmpeg",
+    "macos",
+    "window-layout",
+    "avfoundation",
+    "cli"
+  ],
+  "dependencies": {
+    "goke": "^6.3.0",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.3",
+    "@types/node": "^22.14.1"
+  }
+}
