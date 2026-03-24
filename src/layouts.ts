@@ -140,7 +140,7 @@ export function resolveLayout(apps: string[], options: ResolveLayoutOptions = {}
       name: `auto-${count}`,
       screen,
       audio,
-      align: options.align ?? 'center',
+      align: options.align ?? 'left',
       windows: [
         { app: apps[0], position: 'left' },
         { app: apps[1], position: 'right-top' },
@@ -159,7 +159,7 @@ export function resolveLayout(apps: string[], options: ResolveLayoutOptions = {}
     name: `auto-${count}`,
     screen,
     audio,
-    align: options.align ?? 'center',
+    align: options.align ?? 'left',
     windows: [
       { app: apps[0], position: 'top-left' },
       { app: apps[1], position: 'top-right' },

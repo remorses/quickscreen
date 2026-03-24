@@ -3,3 +3,4 @@ dist/
 *.lock
 *.tsbuildinfo
 .DS_Store
+*.tgz

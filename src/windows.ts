@@ -77,9 +77,10 @@ export async function getScreens(): Promise<ScreenInfo[]> {
  * Handles the AXEnhancedUserInterface workaround for apps like Alacritty
  * that resist frame changes.
  */
-export async function setWindowFrame(appName: string, frame: Rect): Promise<void> {
-  // First try the JXA approach with AXEnhancedUserInterface workaround
-  // This is needed for Alacritty and similar apps
+export async function setWindowFrame(appName: string, frame: Rect, windowIndex = 0): Promise<void> {
+  // JXA approach with AXEnhancedUserInterface workaround (needed for Alacritty etc.)
+  // windowIndex selects which window of the app to target (0 = frontmost, 1 = second, etc.)
+  // This allows placing multiple windows of the same app in different positions.
   const jxa = `
     ObjC.import('AppKit');
     ObjC.import('ApplicationServices');
@@ -90,8 +91,13 @@ export async function setWindowFrame(appName: string, frame: Rect): Promise<void
     // Get the process
     const sysEvents = Application("System Events");
     const proc = sysEvents.processes.whose({name: {_contains: "${appName}"}})[0];
+    const winIdx = ${windowIndex};
 
     if (proc) {
+      const winCount = proc.windows.length;
+      if (winIdx >= winCount) {
+        throw new Error("Window index " + winIdx + " out of range (app has " + winCount + " windows)");
+      }
       try {
         // Try to get and toggle AXEnhancedUserInterface
         const axApp = proc.attributes.byName("AXEnhancedUserInterface");
@@ -101,7 +107,7 @@ export async function setWindowFrame(appName: string, frame: Rect): Promise<void
         }
 
         // Set position and size
-        const win = proc.windows[0];
+        const win = proc.windows[winIdx];
         win.position = [${Math.round(frame.x)}, ${Math.round(frame.y)}];
         win.size = [${Math.round(frame.w)}, ${Math.round(frame.h)}];
 
@@ -112,13 +118,30 @@ export async function setWindowFrame(appName: string, frame: Rect): Promise<void
         }
       } catch(e) {
         // Fallback: set without AX workaround
-        const win = proc.windows[0];
+        const win = proc.windows[winIdx];
         win.position = [${Math.round(frame.x)}, ${Math.round(frame.y)}];
         win.size = [${Math.round(frame.w)}, ${Math.round(frame.h)}];
       }
     }
   `
   await osascript(jxa, 'JavaScript')
+}
+
+/**
+ * Get the number of windows an application currently has open.
+ */
+export async function getWindowCount(appName: string): Promise<number> {
+  try {
+    const result = await osascript(`
+      ObjC.import('AppKit');
+      const sysEvents = Application("System Events");
+      const proc = sysEvents.processes.whose({name: {_contains: "${appName}"}})[0];
+      proc ? proc.windows.length : 0;
+    `, 'JavaScript')
+    return parseInt(result, 10) || 0
+  } catch {
+    return 0
+  }
 }
 
 /**
@@ -179,10 +202,15 @@ export function showRecordingOverlay(rect: Rect, screenHeight: number): ChildPro
   const border = 3 // border thickness in points
 
   // JXA script that creates 4 border windows and keeps them alive via NSRunLoop.
-  // Using NSScreenSaverWindowLevel + 1 so overlays float above everything
-  // and don't get captured by AVFoundation screen recording.
+  // Key details for visibility:
+  //   - NSApplication activationPolicy must be Accessory so the process can show windows
+  //   - NSPanel.hidesOnDeactivate must be false (panels auto-hide when app is inactive by default)
+  //   - Use real ObjC constants ($.NSScreenSaverWindowLevel etc.) instead of hardcoded integers
   const jxa = `
     ObjC.import('AppKit');
+
+    const app = $.NSApplication.sharedApplication;
+    app.setActivationPolicy($.NSApplicationActivationPolicyAccessory);
 
     const border = ${border};
     const panels = [];
@@ -199,16 +227,20 @@ export function showRecordingOverlay(rect: Rect, screenHeight: number): ChildPro
       const panel = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(
         frame,
         0,  // NSBorderlessWindowMask
-        2,  // NSBackingStoreBuffered
+        $.NSBackingStoreBuffered,
         false
       );
-      panel.setLevel(1050);  // above kCGScreenSaverWindowLevel (1000)
+      panel.setLevel($.NSScreenSaverWindowLevel + 1);
       panel.setOpaque(false);
       panel.setAlphaValue(0.85);
       panel.setBackgroundColor($.NSColor.colorWithRedGreenBlueAlpha(1.0, 0.2, 0.2, 1.0));
       panel.setIgnoresMouseEvents(true);
       panel.setHasShadow(false);
-      panel.setCollectionBehavior(1 << 0 | 1 << 4);  // canJoinAllSpaces | fullScreenAuxiliary
+      panel.setHidesOnDeactivate(false);
+      panel.setCollectionBehavior(
+        $.NSWindowCollectionBehaviorCanJoinAllSpaces |
+        $.NSWindowCollectionBehaviorFullScreenAuxiliary
+      );
       panel.orderFrontRegardless;
       panels.push(panel);
     }
@@ -218,8 +250,18 @@ export function showRecordingOverlay(rect: Rect, screenHeight: number): ChildPro
   `
 
   const proc = spawn('osascript', ['-l', 'JavaScript', '-e', jxa], {
-    stdio: ['ignore', 'ignore', 'ignore'],
+    stdio: ['ignore', 'pipe', 'pipe'],
     detached: false,
+  })
+
+  // Log errors so we can debug overlay issues
+  let stderr = ''
+  proc.stderr?.on('data', (d: Buffer) => { stderr += d.toString() })
+  proc.stdout?.on('data', (d: Buffer) => { stderr += d.toString() })
+  proc.on('close', (code) => {
+    if (code !== null && code !== 0 && code !== 15) { // 15 = SIGTERM (expected on hide)
+      console.error(`Recording overlay error (exit ${code}): ${stderr.trim()}`)
+    }
   })
 
   return proc

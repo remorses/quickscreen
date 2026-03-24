@@ -77,6 +77,33 @@ describe('resolveLayout', () => {
 `)
   })
 
+  test('2 windows of same app → different positions', () => {
+    const layout = resolveLayout(['Chrome', 'Chrome'])
+    expect(layout.windows).toMatchInlineSnapshot(`
+[
+  {
+    "app": "Chrome",
+    "position": "left",
+  },
+  {
+    "app": "Chrome",
+    "position": "right",
+  },
+]
+`)
+  })
+
+  test('3 windows with duplicate app', () => {
+    const layout = resolveLayout(['Chrome', 'Chrome', 'Alacritty'])
+    expect(layout.windows.map((w) => `${w.app}:${w.position}`)).toMatchInlineSnapshot(`
+[
+  "Chrome:left",
+  "Chrome:right-top",
+  "Alacritty:right-bottom",
+]
+`)
+  })
+
   test('0 apps throws', () => {
     expect(() => resolveLayout([])).toThrow('At least one app name is required')
   })

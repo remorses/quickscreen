@@ -17,6 +17,7 @@ import {
   activateApp,
   isAppRunning,
   resolveAppName,
+  getWindowCount,
   showRecordingOverlay,
   hideRecordingOverlay,
 } from './windows.js'
@@ -41,7 +42,7 @@ Or use a built-in layout: ${defaultLayouts.map((l) => l.name).join(', ')}
   .option('--no-audio', 'Disable microphone recording')
   .option('--crf [crf]', z.number().default(18).describe('Video quality, lower is better'))
   .option('--screen [index]', z.number().default(0).describe('Display index (0 = main, 1 = secondary)'))
-  .option('--align [align]', z.enum(['left', 'center', 'right']).default('center').describe('Horizontal alignment'))
+  .option('--align [align]', z.enum(['left', 'center', 'right']).describe('Horizontal alignment (default: left)'))
   .option('--aspect-ratio [ratio]', z.number().describe('Constrain to aspect ratio (e.g. 1.77 for 16:9)'))
   .option('--recording [area]', z.enum(['fullscreen', 'windows']).describe('What area to record'))
   .option('--list', 'List available layouts and exit')
@@ -125,10 +126,15 @@ Or use a built-in layout: ${defaultLayouts.map((l) => l.name).join(', ')}
     //   2 windows: [left, right]
     //   3 windows: [left, right-top, right-bottom]
     //   4 windows: [top-left, top-right, bottom-left, bottom-right]
+    // Per-app window index counter — supports multiple windows of the same app
+    // (e.g. "Chrome Chrome" targets windows[0] and windows[1] of Chrome)
+    const appWindowCounter = new Map<string, number>()
     console.log('Arranging windows...')
     for (let i = 0; i < layout.windows.length; i++) {
       const slot = layout.windows[i]
       const targetFrame = windowFrames[i]
+      const winIdx = appWindowCounter.get(slot.app) ?? 0
+      appWindowCounter.set(slot.app, winIdx + 1)
 
       // Launch app if not running
       const running = await isAppRunning(slot.app)
@@ -138,8 +144,18 @@ Or use a built-in layout: ${defaultLayouts.map((l) => l.name).join(', ')}
         await sleep(1000) // Wait for app to start
       }
 
-      console.log(`  Moving ${slot.app} to ${slot.position} (${Math.round(targetFrame.w)}x${Math.round(targetFrame.h)})`)
-      await setWindowFrame(slot.app, targetFrame)
+      // Warn if the app doesn't have enough windows open
+      if (winIdx > 0) {
+        const count = await getWindowCount(slot.app)
+        if (winIdx >= count) {
+          console.warn(`  Warning: ${slot.app} has ${count} window(s) but need window #${winIdx + 1}. Open another window first.`)
+          continue
+        }
+      }
+
+      const label = winIdx > 0 ? `${slot.app} [window ${winIdx + 1}]` : slot.app
+      console.log(`  Moving ${label} to ${slot.position} (${Math.round(targetFrame.w)}x${Math.round(targetFrame.h)})`)
+      await setWindowFrame(slot.app, targetFrame, winIdx)
       await sleep(200) // Small delay between window operations
     }
 
@@ -150,19 +166,12 @@ Or use a built-in layout: ${defaultLayouts.map((l) => l.name).join(', ')}
     // Wait for windows to settle
     await sleep(500)
 
-    // Show recording area overlay (red border around the crop region)
-    // Displayed briefly so the user can see what will be recorded, then
-    // dismissed before ffmpeg starts so it doesn't appear in the video.
-    // (AVFoundation captures all window levels — there's no public API to
-    // exclude a window from screen capture like the built-in recorder does.)
+    // Show recording area overlay (red border around the recording crop region).
+    // The overlay sits above NSScreenSaverWindowLevel so AVFoundation doesn't capture it.
+    // It stays visible for the entire recording and is dismissed on Ctrl+C / process exit.
     const overlayRect = recordingRect ?? screen
-    // NSWindow coordinate conversion needs the main screen height (screen 0)
     const mainScreenH = screens[0].h
     const overlayProc = showRecordingOverlay(overlayRect, mainScreenH)
-    console.log('Showing recording area...')
-    await sleep(1500)
-    hideRecordingOverlay(overlayProc)
-    await sleep(200)
 
     // Start recording
     const outputPath = generateOutputPath(options.output)
@@ -170,7 +179,7 @@ Or use a built-in layout: ${defaultLayouts.map((l) => l.name).join(', ')}
 
     console.log(`Recording to: ${outputPath}`)
     console.log(`Audio: ${audio ? 'on (default mic)' : 'off'}`)
-    console.log(`Press Ctrl+C to stop recording\n`)
+    console.log(`Press Ctrl+C to save, Ctrl+Z to discard\n`)
 
     const ffmpeg = startRecording({
       screenName,
@@ -198,13 +207,14 @@ Or use a built-in layout: ${defaultLayouts.map((l) => l.name).join(', ')}
       }
     })
 
-    // Handle Ctrl+C gracefully
+    // Ctrl+C: stop recording and save the file
     let stopping = false
-    const cleanup = async () => {
+    const save = async () => {
       if (stopping) return
       stopping = true
 
       console.log('\nStopping recording...')
+      hideRecordingOverlay(overlayProc)
       await stopRecording(ffmpeg)
 
       // Wait a moment for file to be fully written
@@ -218,8 +228,26 @@ Or use a built-in layout: ${defaultLayouts.map((l) => l.name).join(', ')}
       process.exit(0)
     }
 
-    process.on('SIGINT', cleanup)
-    process.on('SIGTERM', cleanup)
+    // Ctrl+Z: discard recording and clean up
+    const discard = async () => {
+      if (stopping) return
+      stopping = true
+
+      console.log('\nDiscarding recording...')
+      hideRecordingOverlay(overlayProc)
+      ffmpeg.kill('SIGKILL')
+
+      // Remove the partial file
+      const { unlink } = await import('fs/promises')
+      try { await unlink(outputPath) } catch {}
+
+      console.log('Recording discarded.')
+      process.exit(0)
+    }
+
+    process.on('SIGINT', save)
+    process.on('SIGTERM', save)
+    process.on('SIGTSTP', discard)
 
     // Keep the process alive while ffmpeg runs
     await new Promise<void>((resolve) => {
