@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { goke } from 'goke'
 import { z } from 'zod'
-import { defaultLayouts } from './layouts.js'
+import { defaultLayouts, resolveLayout } from './layouts.js'
 import {
   getScreenName,
   generateOutputPath,
@@ -16,6 +16,9 @@ import {
   launchApp,
   activateApp,
   isAppRunning,
+  resolveAppName,
+  showRecordingOverlay,
+  hideRecordingOverlay,
 } from './windows.js'
 import { createRequire } from 'module'
 
@@ -25,27 +28,39 @@ const pkg = require('../package.json') as { version: string }
 const cli = goke('quickscreen')
 
 cli
-  .command('[layout]', `Start a layout, arrange windows, and record the screen. Press Ctrl+C to stop and save.
+  .command('[...apps]', `Arrange windows and record the screen. Press Ctrl+C to stop and save.
 
-Available built-in layouts: ${defaultLayouts.map((l) => l.name).join(', ')}
+Pass app names to auto-arrange them:
+  quickscreen "Google Chrome" Alacritty     # 2 apps → side-by-side
+  quickscreen Alacritty                      # 1 app  → fullscreen
+  quickscreen Chrome Alacritty Finder        # 3 apps → 1 left + 2 right
 
-If no layout is specified, lists available layouts.`)
+Or use a built-in layout: ${defaultLayouts.map((l) => l.name).join(', ')}
+  quickscreen split                          # Chrome left, Alacritty right`)
   .option('--output [dir]', z.string().describe('Output directory for recordings (default: ~/Desktop)'))
   .option('--no-audio', 'Disable microphone recording')
   .option('--crf [crf]', z.number().default(18).describe('Video quality, lower is better'))
+  .option('--screen [index]', z.number().default(0).describe('Display index (0 = main, 1 = secondary)'))
+  .option('--align [align]', z.enum(['left', 'center', 'right']).default('center').describe('Horizontal alignment'))
+  .option('--aspect-ratio [ratio]', z.number().describe('Constrain to aspect ratio (e.g. 1.77 for 16:9)'))
+  .option('--recording [area]', z.enum(['fullscreen', 'windows']).describe('What area to record'))
   .option('--list', 'List available layouts and exit')
-  .example('# Record with the split layout (Chrome left, Alacritty right)')
+  .example('# Two apps side by side')
+  .example('quickscreen "Google Chrome" Alacritty')
+  .example('# Single app fullscreen')
+  .example('quickscreen Alacritty')
+  .example('# Three apps: 1 left + 2 stacked right')
+  .example('quickscreen Chrome Alacritty Finder')
+  .example('# Use a built-in layout')
   .example('quickscreen split')
-  .example('# Record centered terminal on secondary display')
-  .example('quickscreen center')
-  .example('# Record without audio')
-  .example('quickscreen split --no-audio')
-  .example('# List available layouts')
+  .example('# Record on secondary display without audio')
+  .example('quickscreen Alacritty --screen 1 --no-audio')
+  .example('# List built-in layouts')
   .example('quickscreen --list')
-  .action(async (layoutName, options) => {
+  .action(async (apps, options) => {
     // List layouts
-    if (options.list || !layoutName) {
-      console.log('Available layouts:\n')
+    if (options.list || apps.length === 0) {
+      console.log('Available built-in layouts:\n')
       for (const layout of defaultLayouts) {
         const windows = layout.windows.map((w) => `${w.app} (${w.position})`).join(', ')
         console.log(`  ${layout.name}`)
@@ -54,14 +69,29 @@ If no layout is specified, lists available layouts.`)
         console.log(`    recording: ${layout.recording.area}${layout.recording.aspectRatio ? ` (${layout.recording.aspectRatio}:1)` : ''}`)
         console.log()
       }
+      console.log('Or pass app names directly: quickscreen "Google Chrome" Alacritty\n')
       return
     }
 
-    // Find layout
-    const layout = defaultLayouts.find((l) => l.name === layoutName)
-    if (!layout) {
-      console.error(`Unknown layout: "${layoutName}". Available: ${defaultLayouts.map((l) => l.name).join(', ')}`)
-      process.exit(1)
+    // Check if the first (and only) arg matches a built-in layout name
+    let layout
+    const builtIn = apps.length === 1 ? defaultLayouts.find((l) => l.name === apps[0]) : undefined
+    if (builtIn) {
+      layout = { ...builtIn }
+    } else {
+      // Resolve app names to fuzzy-matched macOS app names
+      const resolvedApps: string[] = []
+      for (const app of apps) {
+        const resolved = await resolveAppName(app)
+        resolvedApps.push(resolved)
+      }
+      layout = resolveLayout(resolvedApps, {
+        screen: options.screen,
+        audio: options.audio !== false,
+        align: options.align,
+        aspectRatio: options.aspectRatio,
+        recording: options.recording,
+      })
     }
 
     // Override audio from flag
@@ -90,17 +120,15 @@ If no layout is specified, lists available layouts.`)
     )
 
     // Arrange windows
+    // Frames are returned in the same order as layout.windows:
+    //   1 window:  [center]
+    //   2 windows: [left, right]
+    //   3 windows: [left, right-top, right-bottom]
+    //   4 windows: [top-left, top-right, bottom-left, bottom-right]
     console.log('Arranging windows...')
     for (let i = 0; i < layout.windows.length; i++) {
       const slot = layout.windows[i]
-      const frame = windowFrames[i]
-
-      // Determine which frame to use based on position
-      let targetFrame = frame
-      if (layout.windows.length === 2) {
-        if (slot.position === 'left') targetFrame = windowFrames[0]
-        else if (slot.position === 'right') targetFrame = windowFrames[1]
-      }
+      const targetFrame = windowFrames[i]
 
       // Launch app if not running
       const running = await isAppRunning(slot.app)
@@ -121,6 +149,20 @@ If no layout is specified, lists available layouts.`)
 
     // Wait for windows to settle
     await sleep(500)
+
+    // Show recording area overlay (red border around the crop region)
+    // Displayed briefly so the user can see what will be recorded, then
+    // dismissed before ffmpeg starts so it doesn't appear in the video.
+    // (AVFoundation captures all window levels — there's no public API to
+    // exclude a window from screen capture like the built-in recorder does.)
+    const overlayRect = recordingRect ?? screen
+    // NSWindow coordinate conversion needs the main screen height (screen 0)
+    const mainScreenH = screens[0].h
+    const overlayProc = showRecordingOverlay(overlayRect, mainScreenH)
+    console.log('Showing recording area...')
+    await sleep(1500)
+    hideRecordingOverlay(overlayProc)
+    await sleep(200)
 
     // Start recording
     const outputPath = generateOutputPath(options.output)

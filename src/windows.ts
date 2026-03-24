@@ -1,4 +1,4 @@
-import { spawn } from 'child_process'
+import { spawn, type ChildProcess } from 'child_process'
 
 /**
  * Run an osascript command (AppleScript or JXA) and return stdout.
@@ -157,4 +157,116 @@ export async function isAppRunning(appName: string): Promise<boolean> {
  */
 export async function showNotification(message: string): Promise<void> {
   await osascript(`display notification "${message}" with title "quickscreen"`)
+}
+
+/**
+ * Show a colored border overlay around a screen rect to indicate the recording area.
+ * Creates 4 thin NSWindow panels (top/bottom/left/right) that form a border.
+ * The windows are transparent to clicks, always on top, and don't appear in recordings
+ * because they sit at a window level above what AVFoundation captures.
+ *
+ * Returns the osascript child process — kill it to dismiss the overlay.
+ *
+ * Coordinate conversion: our Rect uses top-left origin (matching ffmpeg/AVFoundation),
+ * but NSWindow uses bottom-left origin. We convert using the main screen height.
+ */
+export function showRecordingOverlay(rect: Rect, screenHeight: number): ChildProcess {
+  // Convert from top-left origin to NSWindow bottom-left origin
+  const nsX = rect.x
+  const nsY = screenHeight - rect.y - rect.h
+  const w = rect.w
+  const h = rect.h
+  const border = 3 // border thickness in points
+
+  // JXA script that creates 4 border windows and keeps them alive via NSRunLoop.
+  // Using NSScreenSaverWindowLevel + 1 so overlays float above everything
+  // and don't get captured by AVFoundation screen recording.
+  const jxa = `
+    ObjC.import('AppKit');
+
+    const border = ${border};
+    const panels = [];
+    // [x, y, w, h] for each edge — in NSWindow (bottom-left) coordinates
+    const edges = [
+      [${nsX}, ${nsY + h - border}, ${w}, ${border}],           // top
+      [${nsX}, ${nsY}, ${w}, ${border}],                         // bottom
+      [${nsX}, ${nsY}, ${border}, ${h}],                         // left
+      [${nsX + w - border}, ${nsY}, ${border}, ${h}],            // right
+    ];
+
+    for (const [ex, ey, ew, eh] of edges) {
+      const frame = $.NSMakeRect(ex, ey, ew, eh);
+      const panel = $.NSPanel.alloc.initWithContentRectStyleMaskBackingDefer(
+        frame,
+        0,  // NSBorderlessWindowMask
+        2,  // NSBackingStoreBuffered
+        false
+      );
+      panel.setLevel(1050);  // above kCGScreenSaverWindowLevel (1000)
+      panel.setOpaque(false);
+      panel.setAlphaValue(0.85);
+      panel.setBackgroundColor($.NSColor.colorWithRedGreenBlueAlpha(1.0, 0.2, 0.2, 1.0));
+      panel.setIgnoresMouseEvents(true);
+      panel.setHasShadow(false);
+      panel.setCollectionBehavior(1 << 0 | 1 << 4);  // canJoinAllSpaces | fullScreenAuxiliary
+      panel.orderFrontRegardless;
+      panels.push(panel);
+    }
+
+    // Keep the process alive — NSRunLoop keeps windows visible
+    $.NSRunLoop.currentRunLoop.run;
+  `
+
+  const proc = spawn('osascript', ['-l', 'JavaScript', '-e', jxa], {
+    stdio: ['ignore', 'ignore', 'ignore'],
+    detached: false,
+  })
+
+  return proc
+}
+
+/**
+ * Dismiss the recording overlay by killing its osascript process.
+ */
+export function hideRecordingOverlay(proc: ChildProcess): void {
+  if (proc.exitCode === null) {
+    proc.kill('SIGTERM')
+  }
+}
+
+/**
+ * Resolve a shorthand app name to the full macOS application name.
+ * Checks running processes first for a case-insensitive substring match,
+ * then falls back to the literal input.
+ *
+ * Examples:
+ *   "chrome"    → "Google Chrome"
+ *   "alacritty" → "Alacritty"
+ *   "finder"    → "Finder"
+ */
+export async function resolveAppName(input: string): Promise<string> {
+  try {
+    const result = await osascript(`
+      tell application "System Events"
+        set appNames to name of every process whose background only is false
+      end tell
+      set AppleScript's text item delimiters to "||"
+      return appNames as text
+    `)
+    const runningApps = result.split('||').map((s) => s.trim()).filter(Boolean)
+    const lower = input.toLowerCase()
+
+    // Exact match (case-insensitive)
+    const exact = runningApps.find((a) => a.toLowerCase() === lower)
+    if (exact) return exact
+
+    // Substring match (e.g. "chrome" matches "Google Chrome")
+    const substring = runningApps.find((a) => a.toLowerCase().includes(lower))
+    if (substring) return substring
+
+    // No match found — return input as-is (the app may not be running yet)
+    return input
+  } catch {
+    return input
+  }
 }
