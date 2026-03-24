@@ -206,6 +206,45 @@ export function calculateLayoutGeometry(
       { x: leftX, y, w: windowW, h: usableH },
       { x: rightX, y, w: windowW, h: usableH },
     )
+  } else if (windowCount === 3) {
+    // 1 left (full height) + 2 right (stacked vertically)
+    // ┌──────────┬──────────┐
+    // │          │  right   │
+    // │   left   ├──────────┤
+    // │          │  right   │
+    // └──────────┴──────────┘
+    const availableW = usableW - gapPx
+    const colW = availableW / 2
+    const leftX = offsetX + edgePx
+    const rightX = leftX + colW + gapPx
+    const y = offsetY + topPx
+    const rightH = (usableH - gapPx) / 2
+
+    windowFrames.push(
+      { x: leftX, y, w: colW, h: usableH },           // left (full height)
+      { x: rightX, y, w: colW, h: rightH },             // right-top
+      { x: rightX, y: y + rightH + gapPx, w: colW, h: rightH }, // right-bottom
+    )
+  } else if (windowCount === 4) {
+    // 2×2 grid
+    // ┌──────────┬──────────┐
+    // │  top-L   │  top-R   │
+    // ├──────────┼──────────┤
+    // │  bot-L   │  bot-R   │
+    // └──────────┴──────────┘
+    const colW = (usableW - gapPx) / 2
+    const rowH = (usableH - gapPx) / 2
+    const leftX = offsetX + edgePx
+    const rightX = leftX + colW + gapPx
+    const topY = offsetY + topPx
+    const bottomY = topY + rowH + gapPx
+
+    windowFrames.push(
+      { x: leftX, y: topY, w: colW, h: rowH },      // top-left
+      { x: rightX, y: topY, w: colW, h: rowH },     // top-right
+      { x: leftX, y: bottomY, w: colW, h: rowH },   // bottom-left
+      { x: rightX, y: bottomY, w: colW, h: rowH },  // bottom-right
+    )
   }
 
   // Calculate recording rect
